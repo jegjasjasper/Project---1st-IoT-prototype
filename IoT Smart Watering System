@@ -1,0 +1,302 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include "DHT.h"
+
+// ================= PIN DEFINITIONS =================
+#define SOIL_PIN 34
+#define SOIL_PIN2 32
+#define SOIL_PIN3 33
+#define SOIL_PIN4 35
+#define SOIL_PIN5 36
+#define SOIL_PIN6 39
+#define RELAY_PIN 26
+#define DHTPIN 4
+#define DHTTYPE DHT22
+
+
+// ================= Soil Moisture DEFINITIONS =================
+const int SOIL_DRY[6] = {
+  1713,
+  1764,
+  1754,
+  1726,
+  1748,
+  1862
+};
+
+const int SOIL_WET[6] = {
+   725,
+  647,
+   631,
+  587,
+   578,
+   650
+};
+DHT dht(DHTPIN, DHTTYPE);
+
+// ================= WIFI =================
+#define WIFI_SSID "JEG"
+#define WIFI_PASSWORD "AAAAAAAA"
+
+// ================= FIREBASE =================
+#define API_KEY "AIzaSyDO_fHcvqbkSUHmuuW6dKS32U1PiIT-ZeI"
+#define DATABASE_URL "https://weatheradaptiveirrigation-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// =======  Prevent infinite watering  =====
+  unsigned long maxWaterDuration = 30000; // 30 sec safety
+
+// ================  Fix 4  ================
+  unsigned long lastUpload = 0;
+  unsigned long uploadInterval = 10000; // 10 seconds
+
+// ================ blocked ================
+unsigned long blockedStart = 0;
+const unsigned long blockedTimeout = 15000;
+
+// ================ STATES ================
+enum PumpState {
+  STATE_IDLE,
+  STATE_WATER_ON,
+  STATE_WATER_OFF,
+  STATE_BLOCKED
+};
+PumpState pumpState = STATE_IDLE;
+
+// ================= GLOBAL SENSOR DATA =================
+int soilPercent[6];
+float temp, hum;
+bool rainExpected = false;
+
+// ================ Timing Variables ================
+unsigned long stateStartTime = 0;
+unsigned long waterDuration = 10000;
+unsigned long restDuration = 100;
+
+// ====== Average Sensor Read ======
+int readAverage(int pin) {
+  long sum = 0;
+
+  for(int i = 0; i < 10; i++) {
+    sum += analogRead(pin);
+    delay(2);
+  }
+
+  return sum / 10;
+}
+
+// ========== 1. Read Sensors ==========
+void readSensors(){
+
+  int SoilRaw[6];
+  SoilRaw[0] = readAverage(SOIL_PIN);
+  SoilRaw[1] = readAverage(SOIL_PIN2);
+  SoilRaw[2] = readAverage(SOIL_PIN3);
+  SoilRaw[3] = readAverage(SOIL_PIN4);
+  SoilRaw[4] = readAverage(SOIL_PIN5);
+  SoilRaw[5] = readAverage(SOIL_PIN6);
+
+  
+  for(int i = 0; i < 6;i++){
+  
+  soilPercent[i] = map(SoilRaw[i], SOIL_DRY[i], SOIL_WET[i], 0, 100);
+  soilPercent[i] = constrain(soilPercent[i], 0, 100); // soil moisture sensors
+
+}
+
+
+
+  temp = dht.readTemperature();
+  hum = dht.readHumidity();
+
+}
+
+
+
+// ========== 2. Compute score ==========
+int computeScore(){
+
+  int count = 0; // Sensors below 60
+  int score = 0;
+
+  for(int i = 0; i < 6;i++){
+
+     if(soilPercent[i] < 75){
+        count ++;
+     }
+
+  }
+
+
+  if(count >= 3) score += 60;
+  if(temp > 32) score += 0;
+  // if(hum < 60) score += 20;
+  if(hum > 80) score -= 30;
+
+  if(rainExpected) score = 0;
+
+  return score;
+
+}
+
+
+// ========= 3. Handle pump state machine =========
+void handlePumpState(bool firebaseOK, int score) {
+
+  unsigned long now = millis();
+
+  switch (pumpState) {
+
+    // ---------------- IDLE STATE ----------------
+    case STATE_IDLE:
+
+      if (score < 50) {
+        digitalWrite(RELAY_PIN, LOW);
+
+        if (firebaseOK) {
+          Firebase.RTDB.setString(&fbdo, "/control/pump", "OFF");
+        }
+
+        blockedStart = millis();
+        pumpState = STATE_BLOCKED;
+      }
+      else {
+        pumpState = STATE_WATER_ON;
+        stateStartTime = now;
+      }
+      break;
+
+    // ---------------- WATER ON ----------------
+    case STATE_WATER_ON:
+
+      digitalWrite(RELAY_PIN, HIGH);
+
+      if (firebaseOK) {
+        Firebase.RTDB.setString(&fbdo, "/control/pump", "ON");
+      }
+
+      if (now - stateStartTime >= waterDuration) {
+        pumpState = STATE_WATER_OFF;
+        stateStartTime = now;
+      }
+      break;
+
+    // ---------------- WATER OFF (REST) ----------------
+    case STATE_WATER_OFF:
+
+      digitalWrite(RELAY_PIN, LOW);
+
+      if (now - stateStartTime >= restDuration) {
+        pumpState = STATE_IDLE;
+      }
+      break;
+
+    // ---------------- BLOCKED (safety stop) ----------------
+    case STATE_BLOCKED:
+
+      digitalWrite(RELAY_PIN, LOW);
+
+      if (millis() - blockedStart > blockedTimeout){
+        pumpState = STATE_IDLE;
+      }
+      break;
+  }
+}
+
+// ======== 4. Firebase upload (unchanged) ========
+void uploadData(bool firebaseOK){
+
+
+  if (firebaseOK && millis() - lastUpload > uploadInterval) {
+    lastUpload = millis();
+
+    Serial.println("Sending data to Firebase...");
+
+    for(int i = 0; i < 6; i++){
+      String path = "/sensor/soil" + String(i + 1);
+      if (!Firebase.RTDB.setInt(&fbdo, path.c_str(), soilPercent[i])) {
+        Serial.println(fbdo.errorReason());
+      }
+    
+    }
+
+    if (!Firebase.RTDB.setFloat(&fbdo, "/sensor/temperature", temp)) {
+      Serial.println(fbdo.errorReason());
+    }
+
+    if (!Firebase.RTDB.setFloat(&fbdo, "/sensor/humidity", hum)) {
+      Serial.println(fbdo.errorReason());
+    }
+  }
+
+
+
+  if (firebaseOK && Firebase.RTDB.getBool(&fbdo, "/weather/rain_expected")) {
+    rainExpected = fbdo.boolData();
+  }
+
+}
+
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); // Pump OFF
+
+  dht.begin();
+
+
+
+  // ---------- WIFI ----------
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("\nWiFi connected");
+
+  // ---------- FIREBASE CONFIG ----------
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  // Enable anonymous sign-in (CRITICAL)
+  Firebase.signUp(&config, &auth, "", "");
+
+  // Enable debug output
+  config.token_status_callback = nullptr;
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  Serial.println("Firebase initialized");
+}
+
+// ================= LOOP =================
+void loop() {
+
+
+  bool firebaseOK = Firebase.ready();
+
+  // 1. Read Sensors
+  readSensors();
+
+
+  // 2. Compute score
+  int score = computeScore();
+
+
+  // 3. Handle pump state machine
+  handlePumpState(firebaseOK, score);
+
+
+  // 4. Firebase upload (unchanged)
+  uploadData(firebaseOK);
+  
+
+}
