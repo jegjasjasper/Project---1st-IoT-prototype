@@ -14,10 +14,11 @@ The plants are watered automatically based on data collected from the system's s
 
 ## Features
 
-- Feature 1
-- Feature 2
-- Feature 3
-- Feature 4
+* **Mobile Monitoring App** – Monitor sensor readings and remotely control the irrigation system, including disabling watering when rain is detected or expected.
+* **Automatic Drip Irrigation** – Delivers water directly to the plants while helping reduce water waste.
+* **Solar-Powered** – Uses solar energy as the primary power source for the system.
+* **Self-Built Power System** – Features a custom-built power system designed to supply the required power to the ESP32, sensors, and pump.
+
 
 ## Hardware
 
@@ -37,25 +38,3 @@ The plants are watered automatically based on data collected from the system's s
 - Firebase
 - MIT App Inventor
 
-## System Architecture
-
-Describe how the major components communicate.
-
-```text
-Solar Panel
-     ↓
-Charge Controller
-     ↓
-Battery
-     ↓
-Voltage Regulation
-     ↓
-ESP32
- ┌───┼───────────┐
- ↓   ↓           ↓
-DHT22 Soil      Pump
-     Sensors
-       ↓
-    Firebase
-       ↓
-  Mobile App
